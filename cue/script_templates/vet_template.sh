@@ -5,9 +5,9 @@ set -e
 function main() {
     EXECROOT_PATH="$(head -1 %ROOT_DIR_FILE%)/execroot/${TEST_WORKSPACE}"
     CUE_BINARY="${EXECROOT_PATH}/%CUE_EXECUTABLE%"
-    
+
     unzip -qo "%SCHEMA_MODULE_ZIP_ARCHIVE%"
-    
+
     PRESENT_WORKING_DIRECTORY=`pwd`
     ORIGINAL_SCHEMA_PATH="%SCHEMA_PATH%"
 

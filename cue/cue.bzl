@@ -50,7 +50,7 @@ def _add_external_file_marker_attr_to(attrs):
             # This just has to point to a source file in an external repo. It is
             # only used by a local action, so it doesn't matter what it points
             # to.
-            default = "@io_bazel_rules_go//:LICENSE.txt",
+            default = "@io_bazel_rules_go//:AUTHORS",
             ),
     })
     return attrs

@@ -1,0 +1,11 @@
+load("//cue:cue.bzl", "cue_instance")
+
+cue_instance(
+    name = "book",
+    package_name = "books",
+    srcs = [
+        "book.cue",
+    ],
+    ancestor = "//test/testdata/library/cue.mod",
+    visibility = ["//test/testdata/library:__subpackages__"],
+)
