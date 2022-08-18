@@ -32,25 +32,73 @@ def _replacer_if_stamping(stamping_policy):
     # NB: We can't access the "_cue_config" attribute here.
     return Label("//tools/cmd/replace-stamps") if stamping_policy != "Never" else None
 
-def _add_common_output_producing_attrs_to(attrs):
+def _add_cue_runtime_attr_to(attrs):
     attrs.update({
         "_cue": attr.label(
             default = "//cue:cue_runtime",
             executable = True,
             allow_single_file = True,
             cfg = "exec",
+        )
+    })
+    return attrs
+
+def _add_external_file_marker_attr_to(attrs):
+    attrs.update({
+        "_external_file_marker": attr.label(
+            allow_single_file = True,
+            # This just has to point to a source file in an external repo. It is
+            # only used by a local action, so it doesn't matter what it points
+            # to.
+            default = "@io_bazel_rules_go//:LICENSE.txt",
+            ),
+    })
+    return attrs
+
+def _add_vet_attrs_to(attrs):
+    attrs.update({
+        "schema": attr.label(
+            providers = [CUEInstanceInfo],
+            mandatory = True,
+            cfg = "host",
         ),
+        "files_to_vet": attr.label_list(
+            doc = "Configuration files to vet against a given CUE schema.",
+            allow_files = [".yml", ".json"],
+            allow_empty = False,
+            mandatory = True,
+            cfg = "host",
+        ),
+        "_vet_script_template": attr.label(
+            default = Label("//cue:script_templates/vet_template.sh"),
+            executable = True,
+            allow_single_file = True,
+            cfg = "host",
+        ),
+    })
+    return attrs
+
+def _add_zipper_executable_attr_to(attrs):
+    attrs.update({
+        "_zipper": attr.label(
+        default = Label("@bazel_tools//tools/zip:zipper"),
+        executable = True,
+        allow_single_file = True,
+        cfg = "exec",
+        ),
+    })
+
+    return attrs
+
+def _add_common_output_producing_attrs_to(attrs):
+    attrs = _add_cue_runtime_attr_to(attrs)
+    attrs = _add_zipper_executable_attr_to(attrs)
+    attrs.update({
         "_cue_config": attr.label(
             default = "//cue:cue_config",
         ),
         "_replacer": attr.label(
             default = _replacer_if_stamping,
-            executable = True,
-            allow_single_file = True,
-            cfg = "exec",
-        ),
-        "_zipper": attr.label(
-            default = Label("@bazel_tools//tools/zip:zipper"),
             executable = True,
             allow_single_file = True,
             cfg = "exec",
@@ -396,6 +444,89 @@ the CUE pacakge name.""",
     },
 )
 
+def _write_root_dir(ctx, external_file):
+    an_external_input = external_file
+
+    output = ctx.actions.declare_file("{}_root_dir".format(ctx.attr.name))
+    ctx.actions.run_shell(
+        inputs = [an_external_input],
+        outputs = [output],
+        command = """\
+# `readlink -f` doesn't exist on macOS, so use perl instead
+external_full_path="$(perl -MCwd -e 'print Cwd::abs_path shift' "{external_full}";)"
+# Strip `/private` prefix from paths (as it breaks breakpoints)
+external_full_path="${{external_full_path#/private}}"
+# Trim the suffix from the paths
+echo "${{external_full_path%/{external_full}}}" >> "{out_full}"
+""".format(
+            external_full = an_external_input.path,
+            out_full = output.path,
+        ),
+        mnemonic = "CalculateRootDir",
+        # This has to run locally
+        execution_requirements = {
+            "local": "1",
+            "no-remote": "1",
+            "no-sandbox": "1",
+        },
+    )
+
+    return output
+
+def _cue_vet_test_impl(ctx):
+    """
+    Uses: `cue vet <file_to_vet_1.yml> <file_to_vet_1.json> ... <schema>` to validate that `files_to_vet` conform to the given
+
+    """
+    external_file_marker = ctx.file._external_file_marker
+    root_dir_file = _write_root_dir(ctx, external_file_marker)
+    schema_instance_files = ctx.attr.schema[CUEInstanceInfo].files
+    if len(schema_instance_files) != 1:
+        fail("Schema should only contain a single file, actually contained: {}".format(schema_instance_files))
+    schema_instance_info = ctx.attr.schema[CUEInstanceInfo]
+    schema = schema_instance_info.files[0]
+    schema_module_info = ctx.attr.schema[CUEInstanceInfo].module
+
+    module_files = []
+    module_files.extend([schema_module_info.module_file])
+    module_files.extend(schema_module_info.external_package_sources.to_list())
+    for instance in schema_instance_info.transitive_instances.to_list():
+        module_files.extend(instance.files)
+
+    zip_archive = _make_zip_archive_of(ctx, module_files)
+    test_executable = ctx.actions.declare_file("vet-{}.sh".format(ctx.attr.name))
+    files_to_vet = [f for target in ctx.attr.files_to_vet for f in target.files.to_list()]
+    files_to_vet_paths = [f.path for f in files_to_vet]
+
+    ctx.actions.expand_template(
+        output = test_executable,
+        template = ctx.file._vet_script_template,
+        is_executable = True,
+        substitutions = {
+            "%ROOT_DIR_FILE%": root_dir_file.short_path,
+            "%CUE_EXECUTABLE%": "{}".format(ctx.executable._cue.path),
+            "%FILES_TO_VET%": " ".join(["'{}'".format(p) for p in files_to_vet_paths]),
+            "%SCHEMA_PATH%": schema.short_path,
+            "%SCHEMA_MODULE_ZIP_ARCHIVE%": zip_archive.short_path,
+            "%SCHEMA_MODULE_ROOT%": schema_module_info.root,
+        }
+    )
+
+    runfiles = files_to_vet + [ctx.executable._cue] + [root_dir_file] + [schema] + [zip_archive]
+
+    return [
+        DefaultInfo(
+	    executable = test_executable,
+            runfiles = ctx.runfiles(files = runfiles),
+        ),
+    ]
+
+cue_vet_test = rule(
+    implementation = _cue_vet_test_impl,
+    attrs = _add_zipper_executable_attr_to(_add_vet_attrs_to(_add_external_file_marker_attr_to(_add_cue_runtime_attr_to({})))),
+    test = True,
+)
+
 def _make_zip_archive_of(ctx, files):
     zip_manifest_file = ctx.actions.declare_file("{}-manifest".format(ctx.label.name))
     ctx.actions.write(
@@ -528,7 +659,7 @@ extra_args_file=$1; shift
 packageless_files_file=$1; shift
 output_file=$1; shift
 
-unzip -q "${source_zip_file}"
+unzip -qo "${source_zip_file}"
 
 oldwd="${PWD}"
 if [ -n "${module_path}" ]; then
