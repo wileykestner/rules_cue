@@ -14,7 +14,7 @@ cue_instance(
 
 cue_vet_test(
     name = "vet_fiction_shelf_failing",
-    files_to_vet = ["fiction_shelf_passing.json"],
+    files_to_vet = ["fiction_shelf_failing.json"],
     schema = ":shelf",
 )
 
