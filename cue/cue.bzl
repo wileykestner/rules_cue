@@ -496,7 +496,7 @@ def _cue_vet_test_impl(ctx):
     zip_archive = _make_zip_archive_of(ctx, module_files)
     test_executable = ctx.actions.declare_file("vet-{}.sh".format(ctx.attr.name))
     files_to_vet = [f for target in ctx.attr.files_to_vet for f in target.files.to_list()]
-    files_to_vet_paths = [f.path for f in files_to_vet]
+    files_to_vet_paths = [f.short_path for f in files_to_vet]
 
     ctx.actions.expand_template(
         output = test_executable,
