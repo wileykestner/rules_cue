@@ -10,22 +10,28 @@ source "${RUNFILES_DIR:-/dev/null}/$f" 2>/dev/null || \
   { echo>&2 "ERROR: cannot find $f"; exit 1; }; f=; set -e
 
 function usage() {
-  printf "usage: %s [-i instance_path] [-m module_file] [-p package_name] cue_tool cue_subcommand extra_args_file packageless_files_file output_file [args...]\n" "$(basename "${0}")" 1>&2
+  printf "usage: %s [-i instance_path] [-m module_file] [-p package_name] [-o output_file] [-e extra_args_file] [-l packageless_files_file] cue_tool cue_subcommand [args...]\n" "$(basename "${0}")" 1>&2
   exit 2
 }
 
 instance_path=
 module_file=
 package_name=
+output_file=
+extra_args_file=
+packageless_files_file=
 
 function parse_args() {
-  while getopts i:m:p: name
+  while getopts i:m:p:o:e:l: name
   do
     case "${name}" in
       i) instance_path="${OPTARG}";;
       h) usage;;
       m) module_file="${OPTARG}";;
       p) package_name="${OPTARG}";;
+      e) extra_args_file="${OPTARG}";;
+      l) packageless_files_file="${OPTARG}";;
+      o) output_file="${OPTARG}";;
       ?) usage;;
     esac
   done
@@ -44,30 +50,35 @@ shift $((OPTIND - 1))
 
 cue=$1; shift
 subcommand=$1; shift
-extra_args_file=$1; shift
-packageless_files_file=$1; shift
-output_file=$1; shift
+
+if [ "${subcommand}" != "vet" ] && [ -z "${output_file}" ]; then
+      printf "%s: specifying CUE subcommand '%s' requires specifying an output_file path\n" "$(basename "${0}")" "${subcommand}" 1>&2
+      exit 1
+fi
 
 oldwd="${PWD}"
+
 packageless_file_args=()
-qualifier=
-while read -r line; do
-  if [ -z "${line}" ]; then
-    continue
-  fi
-  if [[ "${line}" =~ .+:$ ]]; then
-    qualifier="${line}"
-  else
-    if [ -n "${qualifier}" ]; then
-      packageless_file_args+=("${qualifier}")
-      qualifier=
+if [ ! -z "${output_file}" ] && [ ! -z "${packageless_files_file}" ]; then
+  qualifier=
+  while read -r line; do
+    if [ -z "${line}" ]; then
+      continue
     fi
-    packageless_file_args+=("${oldwd}/$(rlocation ${line})")
+    if [[ "${line}" =~ .+:$ ]]; then
+      qualifier="${line}"
+    else
+      if [ -n "${qualifier}" ]; then
+        packageless_file_args+=("${qualifier}")
+        qualifier=
+      fi
+      packageless_file_args+=("${oldwd}/$(rlocation ${line})")
+    fi
+  done < "${packageless_files_file}"
+  if [ -n "${qualifier}" ]; then
+    echo >&2 "No file path followed qualifier \"${qualifier}\"."
+    exit 1
   fi
-done < "${packageless_files_file}"
-if [ -n "${qualifier}" ]; then
-  echo >&2 "No file path followed qualifier \"${qualifier}\"."
-  exit 1
 fi
 
 # NB: If we don't assign to packageless_file_args above in the loop,
@@ -86,14 +97,46 @@ if [ -n "${module_file}" ]; then
   cd "${module_path}"
 fi
 
-# NB: See https://stackoverflow.com/questions/7577052 for the odd
-# treatment of the "packageless_file_args" array variable here,
-# handling the case where the array winds up empty for lack of
-# so-called "packageless files" being used as input. As we are
-# uncertain of which Bash we'll wind up using, aim to work around as
-# many of their mutually exclusive defects as possible.
-"${oldwd}/${cue}" "${subcommand}" --outfile "${oldwd}/${output_file}" \
-  ${instance_path}${package_name:+:${package_name}} \
-  ${packageless_file_args[@]+"${packageless_file_args[@]}"} \
-  $(< "${oldwd}/${extra_args_file}") \
+cue_options_and_arguments=()
+if [[ ! -z "${output_file}" ]]; then
+  cue_options_and_arguments+=( --outfile "${oldwd}/${output_file}" )
+fi
+
+cue_options_and_arguments+=(
+  ${instance_path}${package_name:+:${package_name}}
+)
+
+if [ ! -z "${packageless_files_file}" ]; then
+  # NB: See https://stackoverflow.com/questions/7577052 for the odd
+  # treatment of the "packageless_file_args" array variable here,
+  # handling the case where the array winds up empty for lack of
+  # so-called "packageless files" being used as input. As we are
+  # uncertain of which Bash we'll wind up using, aim to work around as
+  # many of their mutually exclusive defects as possible.
+  cue_options_and_arguments+=(
+    ${packageless_file_args[@]+"${packageless_file_args[@]}"}
+  )
+fi
+
+if [ ! -z "${extra_args_file}" ]; then
+  cue_options_and_arguments+=(
+    $(< "${oldwd}/${extra_args_file}")
+  )
+fi
+
+cue_options_and_arguments+=(
   "${@-}"
+)
+
+if [ "${subcommand}" == "vet" ]; then
+files=()
+  for f in "${@-}"
+  do
+    files+=(
+      "${oldwd}/${f}"
+    )
+  done
+  "${oldwd}/${cue}" "${subcommand}" "${files[@]}"
+else
+  "${oldwd}/${cue}" "${subcommand}" "${cue_options_and_arguments[@]}"
+fi

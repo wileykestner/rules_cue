@@ -501,6 +501,16 @@ _cue_toolchain_type = "//tools/cue:toolchain_type"
 
 def _make_output_producing_action(ctx, cue_subcommand, mnemonic, description, augment_args = None, module_file = None, instance_directory_path = None, instance_package_name = None):
     cue_tool = ctx.toolchains[_cue_toolchain_type].cueinfo.tool
+    stamped_args_file = ctx.actions.declare_file("%s-stamped-args" % ctx.label.name)
+    packageless_files_file = ctx.actions.declare_file("%s-packageless-files" % ctx.label.name)
+    inputs = [
+        stamped_args_file,
+        packageless_files_file,
+    ]
+    outputs = [
+        ctx.outputs.result
+    ]
+
     args = ctx.actions.args()
     if module_file != None:
         args.add("-m", _runfile_path(ctx, module_file))
@@ -512,27 +522,25 @@ def _make_output_producing_action(ctx, cue_subcommand, mnemonic, description, au
         fail(msg = "CUE instance directory path provided without a module directory path")
     elif instance_package_name:
         fail(msg = "CUE package name provided without an instance directory path")
+
+    args.add("-o", ctx.outputs.result.path)
+    args.add("-e", stamped_args_file.path)
+    args.add("-l", packageless_files_file.path)
+
     args.add(cue_tool.path)
     args.add(cue_subcommand)
-    stamped_args_file = ctx.actions.declare_file("%s-stamped-args" % ctx.label.name)
-    args.add(stamped_args_file.path)
-    packageless_files_file = ctx.actions.declare_file("%s-packageless-files" % ctx.label.name)
-    args.add(packageless_files_file.path)
-    args.add(ctx.outputs.result.path)
+
     _add_common_output_producing_args_to(ctx, args, stamped_args_file, packageless_files_file)
 
     if augment_args:
         augment_args(ctx, args)
-
+    
     ctx.actions.run(
         executable = ctx.executable.cue_run,
         arguments = [args],
-        inputs = [
-            stamped_args_file,
-            packageless_files_file,
-        ],
+        inputs = inputs,
         tools = [cue_tool],
-        outputs = [ctx.outputs.result],
+        outputs = outputs,
         mnemonic = mnemonic,
         progress_message = "Capturing the {} CUE configuration for target \"{}\"".format(description, ctx.label.name),
     )
@@ -548,7 +556,7 @@ def _make_module_based_output_producing_action(ctx, cue_subcommand, mnemonic, de
         module.module_file,
     )
 
-def _make_instance_consuming_action(ctx, cue_subcommand, mnemonic, description, augment_args = None):
+def _make_instance_consuming_action(ctx, cue_subcommand, mnemonic, description, action_creator, augment_args = None):
     instance = ctx.attr.instance[CUEInstanceInfo]
 
     # NB: If the input path is equal to the starting path, the
@@ -562,7 +570,7 @@ def _make_instance_consuming_action(ctx, cue_subcommand, mnemonic, description, 
     else:
         relative_instance_path = "./" + relative_instance_path
 
-    _make_output_producing_action(
+    return action_creator(
         ctx,
         cue_subcommand,
         mnemonic,
@@ -742,7 +750,7 @@ def cue_consolidated_files(name, **kwargs):
     )
 
 def _cue_consolidated_instance_impl(ctx):
-    _make_instance_consuming_action(ctx, "def", "CUEDef", "consolidated", _augment_consolidated_output_args)
+    _make_instance_consuming_action(ctx, "def", "CUEDef", "consolidated", _make_output_producing_action, _augment_consolidated_output_args)
 
 _cue_consolidated_instance = rule(
     implementation = _cue_consolidated_instance_impl,
@@ -847,7 +855,7 @@ def cue_exported_files(name, **kwargs):
     )
 
 def _cue_exported_instance_impl(ctx):
-    _make_instance_consuming_action(ctx, "export", "CUEExport", "exported", _augment_exported_output_args)
+    _make_instance_consuming_action(ctx, "export", "CUEExport", "exported", _make_output_producing_action, _augment_exported_output_args)
 
 _cue_exported_instance = rule(
     implementation = _cue_exported_instance_impl,
@@ -862,6 +870,75 @@ def cue_exported_instance(name, **kwargs):
         [
             _prepare_instance_consuming_rule,
             _prepare_exported_output_rule,
+        ],
+        **kwargs
+    )
+
+def _write_cue_vet_test_action(ctx, cue_subcommand, mnemonic, description, augment_args = None, module_file = None, instance_directory_path = None, instance_package_name = None):
+    option_strings = []
+    if module_file != None:
+        option_strings.append("-m {}".format(_runfile_path(ctx, module_file)))
+        if instance_directory_path:
+            option_strings.append("-i {}".format(instance_directory_path))
+            if instance_package_name:
+                option_strings.append("-p {}".format(instance_package_name))
+    elif instance_directory_path:
+        fail(msg = "CUE instance directory path provided without a module directory path")
+    elif instance_package_name:
+        fail(msg = "CUE package name provided without an instance directory path")
+
+    test_runner_script = ctx.actions.declare_file(ctx.label.name + "_vet_test_runner.sh")
+    files = ctx.files.srcs + ctx.attr.instance[CUEInstanceInfo].files
+    
+    cue_tool = ctx.toolchains[_cue_toolchain_type].cueinfo.tool
+
+    test_script_contents = """#!/usr/bin/env bash
+    {cue_run} {option_strings} {cue_tool} {cue_subcommand} {files}
+    """.format(
+        cue_run = ctx.executable.cue_run.short_path,
+        cue_subcommand = cue_subcommand, 
+        cue_tool = cue_tool.path,
+        files = " ".join([f.path for f in files]),
+        directory_path = ctx.attr.instance[CUEInstanceInfo].directory_path,
+        option_strings = " ".join(option_strings)
+    )
+    ctx.actions.write(
+        output = test_runner_script,
+        content = test_script_contents,
+        is_executable = True,
+    )
+
+    tool_runfiles = ctx.runfiles([ctx.executable.cue_run, cue_tool])
+    srcs_runfiles = ctx.runfiles(ctx.files.srcs)
+    instance_runfiles = ctx.runfiles(ctx.attr.instance[CUEInstanceInfo].files + ctx.attr.instance[CUEInstanceInfo].transitive_files.to_list())
+    runfiles = ctx.attr._bash_runfiles[DefaultInfo].default_runfiles.merge_all([tool_runfiles, srcs_runfiles, instance_runfiles])
+
+    return DefaultInfo(
+        executable = test_runner_script,
+        runfiles = runfiles,
+  )
+
+def _cue_vet_test_impl(ctx):
+    return _make_instance_consuming_action(ctx, "vet", "CUEVet", "vetted", _write_cue_vet_test_action)
+
+_cue_vet_test = rule(
+    implementation = _cue_vet_test_impl,
+    attrs = _add_common_source_consuming_attrs_to(_add_common_instance_consuming_attrs_to({
+        "_bash_runfiles": attr.label(
+            doc = "bash runfiles (default)",
+            default = "@bazel_tools//tools/bash/runfiles",
+        ),
+    })),
+    test = True,
+    toolchains = [_cue_toolchain_type],
+)
+
+def cue_vet_test(name, **kwargs):
+    _call_rule_after(
+        name,
+        _cue_vet_test,
+        [
+            _prepare_instance_consuming_rule,
         ],
         **kwargs
     )
