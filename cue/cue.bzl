@@ -865,3 +865,66 @@ def cue_exported_instance(name, **kwargs):
         ],
         **kwargs
     )
+
+def _cue_vet_test_impl(ctx):
+    schema = ctx.attr.schema[CUEInstanceInfo]
+
+    files = ctx.files.srcs + schema.files
+
+    cue_tool = ctx.toolchains[_cue_toolchain_type].cueinfo.tool
+
+    test_script_contents = """#!/usr/bin/env bash
+oldwd="${{PWD}}"
+files_relative_to_script_runpath=()
+for f in {files}
+do
+    files_relative_to_script_runpath+=("${{oldwd}}/${{f}}")
+done
+
+module_path="$(dirname $(dirname {module_file}))"
+cd "${{module_path}}"
+
+${{oldwd}}/{cue_tool} vet ${{files_relative_to_script_runpath[@]}}
+    """.format(
+        cue_tool = cue_tool.path,
+        files = " ".join([f.path for f in files]),
+        module_file = schema.module.module_file.path,
+        directory_path = schema.directory_path,
+    )
+    test_runner_script = ctx.actions.declare_file(ctx.label.name + "_vet_test_runner.sh")
+    ctx.actions.write(
+        output = test_runner_script,
+        content = test_script_contents,
+        is_executable = True,
+    )
+
+    tool_runfiles = ctx.runfiles([cue_tool])
+    srcs_runfiles = ctx.runfiles(ctx.files.srcs)
+    schema_runfiles = ctx.runfiles(schema.files + schema.transitive_files.to_list())
+    runfiles = tool_runfiles.merge_all([schema_runfiles, srcs_runfiles])
+
+    return DefaultInfo(
+        executable = test_runner_script,
+        runfiles = runfiles,
+    )
+
+cue_vet_test = rule(
+    implementation = _cue_vet_test_impl,
+    attrs = {
+        "srcs": attr.label_list(
+            doc = "Files to vet against the schema.",
+            allow_files = True,
+            mandatory = True,
+        ),
+        "schema": attr.label(
+            doc = """CUE instance that publishes a schema to vet srcs against.
+
+This value must refer either to a target using the cue_instance rule
+or another rule that yields a CUEInstanceInfo provider.""",
+            providers = [CUEInstanceInfo],
+            mandatory = True,
+        ),
+    },
+    test = True,
+    toolchains = [_cue_toolchain_type],
+)

@@ -1,0 +1,25 @@
+load(
+    "//cue:cue.bzl",
+    "cue_instance",
+    "cue_vet_test",
+)
+
+cue_instance(
+    name = "shelf",
+    srcs = ["shelf.cue"],
+    ancestor = "//test/testdata/library/cue.mod",
+    visibility = ["//test/testdata/library:__subpackages__"],
+    deps = ["//test/testdata/library/cue.mod/pkg/examplebooks.com/books:book"],
+)
+
+cue_vet_test(
+    name = "vet_fiction_shelf_failing",
+    srcs = ["fiction_shelf_failing.json"],
+    schema = ":shelf",
+)
+
+cue_vet_test(
+    name = "vet_fiction_shelf_passing",
+    srcs = ["success_fixture/fiction_shelf_passing.json"],
+    schema = ":shelf",
+)
